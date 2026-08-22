@@ -227,6 +227,26 @@ def already_running():
     return any(p != me for p in pids)
 
 
+HEARTBEAT = "/tmp/nightpatrol-heartbeat"
+
+
+def heartbeat():
+    """每轮成功巡检后更新心跳文件，供自检/看门狗判断健康。"""
+    json.dump({"ts": int(time.time()), "pid": os.getpid()}, open(HEARTBEAT, "w"))
+
+
+def self_test():
+    """验证核心链路（DB 只读扫描）是否可用。返回 True/False。"""
+    try:
+        con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        cur = con.cursor()
+        cur.execute("SELECT COUNT(*) FROM session WHERE time_updated > ?", (0,)).fetchone()
+        con.close()
+        return True
+    except Exception:
+        return False
+
+
 def main():
     if not PASSWORD:
         print("错误：请设置 OPENCODE_PATROL_PASSWORD 环境变量", file=sys.stderr)
@@ -240,13 +260,18 @@ def main():
         hours = float(args[args.index("--hours") + 1])
 
     if already_running():
-        log("已有巡航实例在跑，本次退出（防重复）")
+        # 即使有常驻实例，--once 模式也要做真实自检（否则实例病了检测不到）
+        ok = self_test()
+        log(f"已有巡航实例在跑；自检{'通过' if ok else '失败！核心链路异常'}")
+        if not ok:
+            sys.exit(3)
         return
 
     log(f"=== 会话巡航启动，运行 {hours} 小时，每 {CYCLE_SEC//60} 分钟巡一轮 ===")
     st = load_state()
     start = time.time()
     cycle = 0
+    consecutive_errors = 0
     while True:
         cycle += 1
         try:
@@ -275,9 +300,15 @@ def main():
                     nudged += 1
                     log(f"第{cycle}轮 处方→[{title[:28]}] ({sig}) {msg[:60]}…")
             con.close()
+            heartbeat()
+            consecutive_errors = 0
             log(f"第{cycle}轮 巡检完成：卡住={len(stalled)} 本轮推动={nudged}")
         except Exception as e:
-            log(f"第{cycle}轮 异常：{e!r}")
+            consecutive_errors += 1
+            log(f"第{cycle}轮 异常（连续第{consecutive_errors}次）：{e!r}")
+            if consecutive_errors >= 3:
+                log("连续 3 轮异常，自我重启……")
+                os.execv(sys.executable, [sys.executable] + sys.argv)
         if once or time.time() - start >= hours * 3600:
             break
         time.sleep(CYCLE_SEC)
