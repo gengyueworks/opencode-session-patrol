@@ -132,7 +132,8 @@ def find_stalled():
 def gather_context(cur, sid):
     """看会话最后一段在干什么，用于选处方。"""
     rows = cur.execute(
-        "SELECT data FROM part WHERE session_id=? ORDER BY time_created DESC LIMIT 15"
+        "SELECT data FROM part WHERE session_id=? ORDER BY time_created DESC LIMIT 15",
+        (sid,),
     ).fetchall()
     waiting_on_task = False
     writing_files = False
@@ -261,7 +262,11 @@ def main():
                     continue
                 if nudged >= MAX_NUDGES_PER_CYCLE:
                     break
-                waiting_task, writing = gather_context(cur, sid)
+                try:
+                    waiting_task, writing = gather_context(cur, sid)
+                except Exception as e:
+                    log(f"第{cycle}轮 诊断 [{title[:28]}] 出错：{e!r}（跳过）")
+                    continue
                 msg = prescription(sig, waiting_task, writing, len(hist))
                 if post_message(sid, msg):
                     hist.append(now)
