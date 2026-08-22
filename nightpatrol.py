@@ -229,6 +229,68 @@ def already_running():
 
 HEARTBEAT = "/tmp/nightpatrol-heartbeat"
 
+# ---- 系统健康监护（ego 内存 / 整机内存 / opencode 快照）----
+EGO_REDLINE_MB = 1536          # ego lite 总内存红线（用户规则 1.5GB）
+EGO_REDLINE_SH = os.path.expanduser("~/.claude/scripts/ego-redline.sh")
+SNAPSHOT_GUARD_SH = os.path.expanduser(
+    "/Volumes/拓展坞 1T2022/2 Codex-Workspace/Codex-Workspace-Main"
+    "/32-AI高质量阅读库/05-情报与深读系统/AI精华情报与深读操作台"
+    "/11-工程脚本与自动化/10-脚本库/scripts/snapshot_guard.sh")
+SNAPSHOT_EVERY_CYCLES = 12     # 快照扫描较重，每 12 轮（约 1 小时）跑一次
+
+
+def ego_memory_mb():
+    r = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+    total = 0
+    alive = False
+    for line in r.stdout.splitlines():
+        if "ego lite" in line.lower() and "grep" not in line:
+            alive = True
+            try:
+                total += int(line.split()[5])  # RSS in KB
+            except Exception:
+                pass
+    return alive, total // 1024
+
+
+def system_health(cycle):
+    """ego 内存红线 / 进程存活 / 整机内存压力 / 定期快照清理。"""
+    # 1) ego
+    alive, mb = ego_memory_mb()
+    if not alive:
+        log("[系统健康] ego lite 进程不存在（可能被退出或崩溃）。不自动拉起，避免打扰；如需使用请手动打开。")
+    elif mb > EGO_REDLINE_MB:
+        log(f"[系统健康] ego 内存 {mb}MB 超红线 {EGO_REDLINE_MB}MB，执行 redline 清理…")
+        if os.path.exists(EGO_REDLINE_SH):
+            try:
+                r = subprocess.run(["bash", EGO_REDLINE_SH], capture_output=True, text=True, timeout=120)
+                out = (r.stdout or r.stderr or "").strip().splitlines()
+                log(f"[系统健康] redline：{out[-1] if out else '(无输出)'}")
+            except Exception as e:
+                log(f"[系统健康] redline 异常：{e!r}")
+        else:
+            log(f"[系统健康] 未找到 {EGO_REDLINE_SH}，跳过清理")
+    # 2) 整机内存压力（swap 用量大 = 机器卡）
+    try:
+        r = subprocess.run(["sysctl", "vm.swapusage"], capture_output=True, text=True)
+        used_mb = 0
+        for seg in r.stdout.strip().split(","):
+            seg = seg.strip()
+            if seg.startswith("used"):
+                used_mb = int(float(seg.split("=")[1].strip().rstrip("M")))
+        if used_mb > 4096:
+            log(f"[系统健康] ⚠️ swap 已用 {used_mb}MB（>4GB，机器会卡）")
+    except Exception:
+        pass
+    # 3) opencode 快照（每小时一次，脚本自带 symlink 解析 + 最旧优先清理）
+    if cycle % SNAPSHOT_EVERY_CYCLES == 0 and os.path.exists(SNAPSHOT_GUARD_SH):
+        try:
+            r = subprocess.run(["bash", SNAPSHOT_GUARD_SH], capture_output=True, text=True, timeout=300)
+            tail = (r.stdout or "").strip().splitlines()
+            log(f"[系统健康] 快照守护：{tail[-1] if tail else '(无输出)'}")
+        except Exception as e:
+            log(f"[系统健康] 快照守护异常：{e!r}")
+
 
 def heartbeat():
     """每轮成功巡检后更新心跳文件，供自检/看门狗判断健康。"""
@@ -302,6 +364,7 @@ def main():
             con.close()
             heartbeat()
             consecutive_errors = 0
+            system_health(cycle)
             log(f"第{cycle}轮 巡检完成：卡住={len(stalled)} 本轮推动={nudged}")
         except Exception as e:
             consecutive_errors += 1
