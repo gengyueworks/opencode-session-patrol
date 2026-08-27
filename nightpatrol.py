@@ -51,7 +51,7 @@ EXCLUDE_TITLE_KEYWORDS = ["夜间巡航", "patrol"]
 
 CYCLE_SEC = 300
 STALL_MIN = 5
-NUDGE_COOLDOWN = 900
+NUDGE_COOLDOWN = 480
 MAX_NUDGES_PER_SESSION = 8
 MAX_NUDGES_PER_CYCLE = 2
 
@@ -98,6 +98,27 @@ def classify_last_part(cur, sid, ts, d):
     return None
 
 
+def is_orphaned_subagent(cur, sid):
+    """如果子会话的父窗口已经收尾，则判定为孤儿会话。"""
+    row = cur.execute("SELECT session_id FROM part WHERE data LIKE ? LIMIT 1", (f"%{sid}%",)).fetchone()
+    if not row:
+        return False
+    parent_id = row[0]
+    # 查父窗口最后的状态
+    p_last = cur.execute(
+        "SELECT data FROM part WHERE session_id=? ORDER BY time_created DESC LIMIT 1",
+        (parent_id,),
+    ).fetchone()
+    if p_last:
+        try:
+            d = json.loads(p_last[0])
+            if d.get("type") == "step-finish" and d.get("reason") in ("stop", "completed"):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def find_stalled():
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     cur = con.cursor()
@@ -110,6 +131,9 @@ def find_stalled():
     out = []
     for sid, title in rows:
         if sid in EXCLUDE_IDS or any(k in (title or "") for k in EXCLUDE_TITLE_KEYWORDS):
+            continue
+        # 智能防撞：如果是孤儿会话直接跳过
+        if "subagent" in (title or "").lower() and is_orphaned_subagent(cur, sid):
             continue
         last = cur.execute(
             "SELECT time_created, data FROM part WHERE session_id=? ORDER BY time_created DESC LIMIT 1",
